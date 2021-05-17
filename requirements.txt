@@ -1,0 +1,7 @@
+sklearn
+torchvision
+torch
+pandas
+opencv-python
+numpy
+tqdm
