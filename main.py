@@ -1,15 +1,24 @@
 import os
+import pathlib
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
 from tqdm import tqdm
-from sklearn.model_selection import train_test_split
 import pandas as pd
 import torch.utils
 import torchvision.transforms as transforms
 from PIL import Image
 import cv2
 import numpy as np
+
+
+
+
+# TODO: fixe train/test splits
+from config import BASE_DIR, LEARNING_RATE, BATCH_SIZE, EPOCHS
 
 try:
     print(os.environ['COLAB_TPU_ADDR'])
@@ -27,6 +36,8 @@ if torch.cuda.is_available():
     device = torch.device("cuda:0")
 else:
     device = torch.device("cpu")
+
+# device = torch.device("cpu")
 print(f"running on {device}")
 
 
@@ -35,20 +46,10 @@ def load_data():
     Load training data and split it into training and validation set
     """
     # reads CSV file into a single dataframe variable
-    data_df = pd.read_csv(os.path.join(os.getcwd(), 'driving_dataset', 'data.txt'), names=['frame', 'steering'],
-                          sep=' ')
+    train_df = pd.read_csv(os.path.join(os.getcwd(), 'driving_dataset/train.txt'), names=['frame', 'steering'], sep=' ')
+    test_df = pd.read_csv(os.path.join(os.getcwd(), 'driving_dataset/test.txt'), names=['frame', 'steering'], sep=' ')
 
-    # yay dataframes, we can select rows and columns by their names
-    # we'll store the camera images as our input data
-    X = data_df[['frame']].values
-    # and our steering commands as our output data
-    y = data_df['steering'].values
-
-    # now we can split the data into a training (80), testing(20), and validation set
-    # thanks scikit learn
-    X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25, random_state=0)
-
-    return X_train, X_valid, y_train, y_valid
+    return train_df['frame'].values, train_df['steering'].values, test_df['frame'].values, test_df['steering'].values
 
 
 """
@@ -129,7 +130,6 @@ class Net(nn.Module):
 
         x = x.view(x.size(0), -1)
 
-
         x = F.elu(self.fc1(x))
         x = F.elu(self.fc2(x))
         x = F.elu(self.fc3(x))
@@ -139,33 +139,36 @@ class Net(nn.Module):
 
 
 def augment(image, steering):
-    if np.random.rand() < 0.5:
-        image = cv2.flip(image, 1)
-        steering = steering * -1.0
+    # if np.random.rand() < 0.5:
+    #     image = cv2.flip(image, 1)
+    #     steering = steering * -1.0
     return image, steering
 
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, samples):
         self.samples = samples
-        self.transform = transforms.Lambda(lambda x: x / 127.5 - 1.0)
+        self.transform = transforms.Compose([transforms.Lambda(lambda x: x / 127.5 - 1.0),
+                                transforms.ToTensor()])
         # transformations = transforms.Compose([transforms.Lambda(lambda x: (x / 255.0) - 0.5)]) # other source
 
     def __getitem__(self, index):
-        image = self.samples[0][index][0]
+        image = self.samples[0][index]
         steering = self.samples[1][index]
 
         image_path = os.path.join(os.getcwd(), 'driving_dataset', image)
         # image = Image.open(image_path)
-        image = cv2.imread(image_path)
-        image, steering = augment(image, steering)
         # image = torch.from_numpy(np.array(image, dtype=np.int32)).long()
+        image = cv2.imread(image_path)
+
+        image, steering = augment(image, steering)
         image = self.transform(image)
 
-        image = image.reshape(3, 256, 455)
+        image = image.reshape(3, 256, 455).float()
 
-        image = torch.from_numpy(image).float()  # dont understand why .float() is necessary
-
+        # image = torch.from_numpy(image)  # dont understand why .float() is necessary
+        # plt.imshow(image.permute(1, 2, 0))
+        # plt.show()
         return image, torch.tensor([steering])
 
     def __len__(self):
@@ -176,58 +179,76 @@ loss_function = nn.MSELoss()
 
 
 def fwd_pass(net, X, y, train=False):
-    #   X = X.view(X.size(0), 3, 70, 320)
+    # X = X.view(-1,3,455,256)
     X = X.to(device)
     y = y.to(device)
 
     if train:
         net.zero_grad()
     outputs = net(X)
-    matches = [torch.argmax(i) == torch.argmax(j) for i, j in zip(outputs, y)]
-    acc = matches.count(True) / len(matches)
 
-
+    # y = y.cpu()
+    # X = X.cpu()
+    # outputs = outputs.cpu()
+    # for i in range(len(X)):
+    #     print(y[i])
+    #     print(outputs[i])
+    #     plt.imshow(X[i].permute(1, 2, 0))
+    #     plt.show()
+    # exit(0)
+    # matches = [torch.argmax(i) == torch.argmax(j) for i, j in zip(outputs, y)]
     loss = loss_function(outputs, y.float())
 
     if train:
         loss.backward()
         optimizer.step()
 
-    return acc, loss
+    return loss
+
+
+
 
 
 def train(net, batch_size=32, epochs=25):
-    train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=2)
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=2)
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=4)
+    log_filename = f"log-{MODEL_NAME}.txt"
 
     net.train()
 
-    for epoch in range(epochs):
-        for i, batch in enumerate(tqdm(train_loader)):
-            X = batch[0]
-            y = batch[1]
+    print(f"logfile: {log_filename}")
+    with open(os.path.join(BASE_DIR, log_filename), "a") as f:
+        for epoch in range(epochs):
+            for i, batch in enumerate(tqdm(train_loader)):
+                X = batch[0]
+                y = batch[1]
 
-            acc, loss = fwd_pass(net, X, y, train=True)
+                loss = fwd_pass(net, X, y, train=True)
 
-            if i % 10 == 0:
-                batch_X, batch_y = next(iter(test_loader))
-                test_acc, test_loss = fwd_pass(net, batch_X, batch_y)
-                # f.write(f"{MODEL_NAME},{round(time.time(),4)},{round(float(acc),2)},{round(float(loss),4)},{round(float(test_acc),2)},{round(float(test_loss),4)}\n")
+                if i % 10 == 0:
+                    batch_X, batch_y = next(iter(test_loader))
+                    test_loss = fwd_pass(net, batch_X, batch_y)
+                    f.write(f"{epoch},{i},{round(float(loss), 4)},{round(float(test_loss), 4)}, {optimizer.param_groups[0]['lr']}\n")
+            print(f"{epoch},{i},{round(float(loss), 4)},{round(float(test_loss), 4)}, {optimizer.param_groups[0]['lr']}")
+            f.flush()
 
 
 data = load_data()
-train_set = Dataset((data[0], data[2]))
-
-test_set = Dataset((data[1], data[3]))
-
+train_set = Dataset((data[0], data[1]))
+test_set = Dataset((data[2], data[3]))
 net = Net()
-optimizer = torch.optim.Adam(net.parameters(), lr=0.0001)
-
-train(net)
+net.to(device)
+optimizer = torch.optim.Adam(net.parameters(), lr=LEARNING_RATE)
+MODEL_NAME = f"model-b{BATCH_SIZE}-{LEARNING_RATE}-{int(time.time())}"
 
 
 def main():
-    print('Hi')
+    pathlib.Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
+
+    train(net, epochs=EPOCHS, batch_size=BATCH_SIZE)
+
+    torch.save(net.state_dict(), os.path.join(BASE_DIR, f"{MODEL_NAME}.pth"))
+
 
 
 if __name__ == '__main__':

@@ -5,3 +5,5 @@ pandas
 opencv-python
 numpy
 tqdm
+matplotlib
+pandas
